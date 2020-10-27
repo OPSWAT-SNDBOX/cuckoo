@@ -21,6 +21,7 @@ from lib.common.defines import THREAD_ALL_ACCESS, PROCESS_ALL_ACCESS
 from lib.common.exceptions import CuckooError
 from lib.common.results import upload_to_host
 from lib.core.ioctl import zer0m0n
+from lib.core.thunder import Thunder, PACKAGE_TO_PRELOADED_APPS
 
 log = logging.getLogger(__name__)
 
@@ -275,9 +276,64 @@ class Process(object):
 
         return bitsize == 32
 
+
+    def process_thunder(self, sample_path, kernel_pipe, forwarder_pipe, dispatcher_pipe, dest, driver_options, args=None, package=None):
+
+        conf = {
+            "SSDT": True,
+            "FILES": True,
+            "REGISTRY": True,
+            "TIME": True,
+            "EXTRA" : False,
+            "LOGGING" : True,
+            "Unknown": True
+        }
+
+        # Choose configuration
+        if dict == type(driver_options):
+            conf = driver_options
+
+        # switch from ultrafast to light
+        if conf.get("ultrafast") and package not in PACKAGE_TO_PRELOADED_APPS.keys():
+            conf["ultrafast"] = False
+            conf["light"] = True
+
+        log.info("thunder configuration: [%s]", str(conf))
+        log.info("[2] thunder configuration: [%s]", str(driver_options))
+
+        thunder = Thunder(kernel_pipe, forwarder_pipe, dispatcher_pipe, dest, package, conf)
+
+        if not thunder.install():
+            return False
+
+        if not thunder.monitor():
+            return False
+
+        # Wait for SHUTDOWN_MUTEX and then stop monitoring
+        # Creating a thread
+        thunder.wait_finish()
+
+        log.info("Thunder - post monitor")
+      
+        ret, hprocess, hthread, pid, tid = thunder.create_monitored_process(sample_path, args=args)
+        if not ret:
+            return False
+
+        # After driver installed, run malware.
+        argv = [sample_path, ]
+        if None != args:
+            argv += args
+
+        log.info("Executing Malware %r", sample_path)
+
+        self.pid = pid #os.getpid()
+        self.tid = tid #KERNEL32.GetCurrentThreadId()
+        return True
+
     def execute(self, path, args=None, dll=None, free=False, curdir=None,
+                kernel_mode=False, kernel_pipe=None, forwarder_pipe=None, dispatcher_pipe=None, destination=None,
                 source=None, mode=None, maximize=False, env=None,
-                trigger=None):
+                trigger=None, driver_options=None, package=None):
         """Execute sample process.
         @param path: sample path.
         @param args: process args.
@@ -290,6 +346,8 @@ class Process(object):
         @param maximize: whether the GUI should be maximized.
         @param env: environment variables.
         @param trigger: trigger to indicate analysis start
+        @param driver_options: driver configuration to use
+        @param package: used package
         @return: operation status.
         """
         if not os.access(path, os.X_OK):
@@ -298,7 +356,33 @@ class Process(object):
             )
             return False
 
+        if not isinstance(path, unicode):
+            path = unicode(path)
+            
+
+        # CloudInfect
+        if kernel_mode or True:
+            log.warning("THUNDER: kernel_mode activated!, [%s]", kernel_mode)
+            log.warning("Arguments: [%s]", str(args))
+            return self.process_thunder(path, kernel_pipe, forwarder_pipe, dispatcher_pipe, destination, driver_options,
+                                        args=self._encode_args(args), package=package)
+
+        log.error("THUNDER: kernel_mode not activated.")
+
         is32bit = self.is32bit(path=path)
+
+        if not dll:
+            if is32bit:
+                dll = "__monitor-x86.dll"
+            else:
+                dll = "monitor-x64.dll"
+
+        dllpath = os.path.abspath(os.path.join("bin", dll))
+
+        if not os.path.exists(dllpath):
+            log.warning("No valid DLL specified to be injected, "
+                        "injection aborted.")
+            return False
 
         if source:
             if isinstance(source, (int, long)) or source.isdigit():
@@ -497,6 +581,8 @@ class Process(object):
         lines = {
             "pipe": self.config.pipe,
             "logpipe": self.config.logpipe,
+            "forwarderpipe": self.config.options.get("forwarderpipe", ""),
+            "dispatcherpipe": self.config.options.get("dispatcherpipe", ""),
             "analyzer": os.getcwd(),
             "first-process": "1" if Process.first_process else "0",
             "startup-time": Process.startup_time,

@@ -38,13 +38,19 @@ from modules import auxiliary
 
 log = logging.getLogger("analyzer")
 
+
 class Files(object):
     PROTECTED_NAMES = ()
+
+    # size limits in bytes
+    MAX_SIZE_SINGLE = 25000000
+    MAX_SIZE_TOTAL = 50000000
 
     def __init__(self):
         self.files = {}
         self.files_orig = {}
         self.dumped = []
+        self.dumped_bytes = 0
 
     def is_protected_filename(self, file_name):
         """Return whether or not to inject into a process with this name."""
@@ -86,6 +92,13 @@ class Files(object):
             log.info("Error dumping file from path \"%s\": %s", filepath, e)
             return
 
+        file_size = os.path.getsize(filepath)
+        will_exceed_total = self.dumped_bytes + file_size > self.MAX_SIZE_TOTAL
+
+        if file_size > self.MAX_SIZE_SINGLE or will_exceed_total:
+            log.info("File from path \"%s\" exceeded size limits", filepath)
+            return
+
         filename = "%s_%s" % (sha256[:16], os.path.basename(filepath))
         upload_path = os.path.join("files", filename)
 
@@ -97,6 +110,7 @@ class Files(object):
                 upload_path, self.files.get(filepath.lower(), [])
             )
             self.dumped.append(sha256)
+            self.dumped_bytes += file_size
         except (IOError, socket.error) as e:
             log.error(
                 "Unable to upload dropped file at path \"%s\": %s",
@@ -124,6 +138,7 @@ class Files(object):
         """Dump all pending files."""
         while self.files:
             self.delete_file(self.files.keys()[0])
+
 
 class ProcessList(object):
     def __init__(self):
@@ -167,6 +182,7 @@ class ProcessList(object):
 
         if pid in self.pids_notrack:
             self.pids_notrack.remove(pid)
+
 
 class CommandPipeHandler(object):
     """Pipe Handler.
@@ -381,6 +397,9 @@ class CommandPipeHandler(object):
             self.tracked[pid][scope] = []
         self.tracked[pid][scope].append(paramtuple)
 
+    def _handle_thunder_process(self, data):
+        return data.split(":")[-1]
+
     def dispatch(self, data):
         response = "NOPE"
 
@@ -411,6 +430,7 @@ class CommandPipeHandler(object):
 
         return response
 
+
 class Analyzer(object):
     """Cuckoo Windows Analyzer.
 
@@ -423,7 +443,6 @@ class Analyzer(object):
         self.config = None
         self.target = None
         self.do_run = True
-        self.time_counter = 0
 
         self.process_lock = threading.Lock()
         self.default_dll = None
@@ -441,6 +460,17 @@ class Analyzer(object):
         if version.major == 5 and version.minor == 1:
             return "\\\\.\\PIPE\\%s" % name
         return "\\??\\PIPE\\%s" % name
+
+    def parse_driver_options(self):
+        driver_options = {}
+
+        options = self.config.options.get("options", "")
+        for k, v in self.config.options.items():
+            if "driver_" in k:
+                real_key = k.split("_", 1)[1]
+                driver_options[real_key] = True
+
+        return driver_options
 
     def prepare(self):
         """Prepare env for analysis."""
@@ -492,6 +522,15 @@ class Analyzer(object):
         )
         self.log_pipe_server.daemon = True
         self.log_pipe_server.start()
+
+        # General ones, for configuration to send later to package
+        # self.config.options["dispatcherpipe"] =  self.config.logpipe  # DISPATCHER
+        # self.config.options["forwarderpipe"] = self.config.pipe  # FORWARDER
+        self.config.options["dispatcherpipe"] = self.config.pipe  # DISPATCHER
+        self.config.options["forwarderpipe"] = self.config.logpipe  # FORWARDER
+        self.config.options["kernel_logpipe"] = "\\\\.\\%s" % (random_string(16, 32))
+        self.config.options["destination"] = destination
+        self.config.options["driver_options"] = self.parse_driver_options()
 
         # We update the target according to its category. If it's a file, then
         # we store the target path.
@@ -570,7 +609,7 @@ class Analyzer(object):
 
         # Try to import the analysis package.
         try:
-            __import__(package_name, globals(), locals(), ["dummy"], -1)
+            package_module = __import__(package_name, globals(), locals(), ["dummy"], -1)
         # If it fails, we need to abort the analysis.
         except ImportError:
             raise CuckooError("Unable to import package \"{0}\", does "
@@ -579,14 +618,16 @@ class Analyzer(object):
         # Initialize the package parent abstract.
         Package()
 
-        # Enumerate the abstract subclasses.
-        try:
-            package_class = Package.__subclasses__()[0]
-        except IndexError as e:
+        # Find the package class, the file name does not always equal the class name (eg doc.py -> Class _DOC_)
+        class_name = next((attr for attr in dir(package_module) if attr.lower() == package.lower()), None)
+        if not class_name:
             raise CuckooError("Unable to select package class "
-                              "(package={0}): {1}".format(package_name, e))
+                              "(package={0})".format(package_name))
+
+        package_class = getattr(package_module, class_name)
 
         # Initialize the analysis package.
+        log.debug("arguments options: [%s]", str(self.config.options))
         self.package = package_class(self.config.options, analyzer=self)
 
         # Move the sample to the current working directory as provided by the
@@ -615,6 +656,7 @@ class Analyzer(object):
         for module in Auxiliary.__subclasses__():
             # Try to start the auxiliary module.
             try:
+                self.config.options['timeout'] = self.config.timeout  # pass timeout to aux modules
                 aux = module(options=self.config.options, analyzer=self)
                 aux_avail.append(aux)
                 aux.init()
@@ -676,9 +718,14 @@ class Analyzer(object):
             log.info("Enabled timeout enforce, running for the full timeout.")
             pid_check = False
 
+        end = KERNEL32.GetTickCount() + int(self.config.timeout) * 1000
+
         while self.do_run:
-            self.time_counter += 1
-            if self.time_counter == int(self.config.timeout):
+            now = KERNEL32.GetTickCount()
+
+            # log.debug("Time passed: {}, terminating at {}".format((end-now)/1000, str(self.config.timeout)))
+
+            if now >= end:
                 log.info("Analysis timeout hit, terminating analysis.")
                 break
 
@@ -795,6 +842,7 @@ class Analyzer(object):
         # Hell yeah.
         log.info("Analysis completed.")
         return True
+
 
 if __name__ == "__main__":
     success = False

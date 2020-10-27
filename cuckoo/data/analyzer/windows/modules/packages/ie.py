@@ -12,6 +12,7 @@ from lib.common.abstracts import Package
 
 log = logging.getLogger(__name__)
 
+
 class IE(Package):
     """Internet Explorer analysis package."""
     PATHS = [

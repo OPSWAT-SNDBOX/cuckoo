@@ -824,6 +824,7 @@ class Processing(object):
 
 class Signature(object):
     """Base class for Cuckoo signatures."""
+    id = None
     name = ""
     description = ""
     severity = 1
@@ -835,6 +836,8 @@ class Signature(object):
     platform = None
     alert = False
     enabled = True
+    process_relationship = False
+    indicator = True
     minimum = None
     maximum = None
     ttp = []
@@ -924,6 +927,16 @@ class Signature(object):
             if item["pid"] == pid:
                 return item
 
+    def get_handles_by_pid(self, pid):
+        """Get calls grouped by handle of a process by its pid
+
+        @param pid: pid to search for.
+        @return: handles.
+        """
+        for item in self.get_results("behavior", {}).get("processes", []):
+            if item["pid"] == pid:
+                return item["calls_by_handle"]
+
     def get_summary(self, key=None, default=[]):
         """Get one or all values related to the global summary."""
         summary = self.get_results("behavior", {}).get("summary", {})
@@ -982,8 +995,8 @@ class Signature(object):
         """
         if actions is None:
             actions = [
-                "regkey_opened", "regkey_written",
-                "regkey_read", "regkey_deleted",
+                "registry_opened", "registry_written",
+                "registry_read", "registry_deleted",
             ]
 
         return self.get_summary_generic(pid, actions)
@@ -1051,8 +1064,8 @@ class Signature(object):
         """
         if actions is None:
             actions = [
-                "regkey_written", "regkey_opened",
-                "regkey_read", "regkey_deleted",
+                "registry_written", "registry_opened",
+                "registry_read", "registry_deleted",
             ]
 
         return self._check_value(pattern=pattern,
@@ -1337,6 +1350,9 @@ class Signature(object):
         """Turn this signature into actionable results."""
         return dict(name=self.name,
                     ttp=self.extend_ttp(),
+                    id=self.id,
+                    process_relationship=self.process_relationship,
+                    indicator=self.indicator,
                     description=self.description,
                     severity=self.severity,
                     families=self.families,

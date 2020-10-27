@@ -4,9 +4,8 @@
 
 import os
 
-from _winreg import HKEY_CURRENT_USER
-
 from lib.common.abstracts import Package
+
 
 class PUB(Package):
     """Word analysis package."""
@@ -22,49 +21,9 @@ class PUB(Package):
         ("ProgramFiles", "Microsoft Office", "root", "Office16", "MSPUB.EXE"),
     ]
 
-    REGKEYS = [
-        [
-            HKEY_CURRENT_USER,
-            "Software\\Microsoft\\Office\\12.0\\Publisher\\Security",
-            {
-                # Enable VBA macros in Office 2007.
-                "VBAWarnings": 1,
-                "AccessVBOM": 1,
-
-                # "The file you are trying to open .xyz is in a different
-                # format than specified by the file extension. Verify the file
-                # is not corrupted and is from trusted source before opening
-                # the file. Do you want to open the file now?"
-                "ExtensionHardening": 0,
-            },
-        ],
-        [
-            HKEY_CURRENT_USER,
-            "Software\\Microsoft\\Office\\15.0\\Publisher\\Security",
-            {
-                # Enable VBA macros in Office 2013.
-                "VBAWarnings": 1,
-                "AccessVBOM": 1,
-
-                # "The file you are trying to open .xyz is in a different
-                # format than specified by the file extension. Verify the file
-                # is not corrupted and is from trusted source before opening
-                # the file. Do you want to open the file now?"
-                "ExtensionHardening": 0,
-            },
-        ],
-        [
-            HKEY_CURRENT_USER,
-            "Software\\Microsoft\\Office\\16.0\\Publisher\\Security",
-            {
-                # Enable VBA macros in Office 2016.
-                "VBAWarnings": 1,
-                "AccessVBOM": 1,
-            },
-        ],
-    ]
-
     def start(self, path):
+        self._allow_embedded_flash()
+
         publisher = self.get_path("Microsoft Office Publisher")
         if not path.endswith(".pub"):
             os.rename(path, path + ".pub")

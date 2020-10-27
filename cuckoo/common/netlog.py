@@ -9,6 +9,7 @@ import hashlib
 import logging
 import os.path
 import struct
+from utils import handle_hex_stream
 
 # The BSON module provided by pymongo works through its "BSON" class.
 if hasattr(bson, "BSON"):
@@ -115,6 +116,15 @@ class BsonParser(object):
                     flags[argument].append(flag)
 
             flags[argument] = "|".join(flags[argument])
+
+    @staticmethod
+    def _normalize_arguments(raw_arguments):
+        """
+        Decodes and formats hexstreams in arguments into human-readable ASCII if possible
+        :param raw_arguments: Dict
+        :return: Dict
+        """
+        return {k: handle_hex_stream(v) for k, v in raw_arguments.items()}
 
     def determine_unserializers(self, arginfo):
         """Determine which unserializers (or converters) have to be used in
@@ -313,10 +323,11 @@ class BsonParser(object):
                     parsed["type"] = "apicall"
                     parsed["pid"] = self.pid
                     parsed["api"] = apiname
+                    parsed["index"] = index
                     parsed["category"] = category
                     parsed["status"] = argdict.pop("is_success", 1)
                     parsed["return_value"] = argdict.pop("retval", 0)
-                    parsed["arguments"] = argdict
+                    parsed["arguments"] = self._normalize_arguments(argdict)
                     parsed["flags"] = {}
 
                     parsed["stacktrace"] = dec.get("s", [])

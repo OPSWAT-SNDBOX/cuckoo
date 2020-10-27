@@ -5,12 +5,21 @@
 
 import glob
 import os
+import base64
+import urllib2
+import json
+import logging
 
 from _winreg import CreateKey, SetValueEx, CloseKey, REG_DWORD, REG_SZ
 
 from lib.api.process import Process
 from lib.common.decide import dump_memory
 from lib.common.exceptions import CuckooPackageError
+
+from lib.core.thunder import PACKAGE_TO_PRELOADED_APPS
+
+log = logging.getLogger(__name__)
+
 
 class Package(object):
     """Base abstract analysis package."""
@@ -128,6 +137,42 @@ class Package(object):
 
             CloseKey(key_handle)
 
+    def _get_commandline(self):
+        """
+        Decodes the "arguments" cuckoo option, which typically include
+        a commandline however we encode it to avoid injection.
+        For example this commandline: "-n 100 1.1.1.1,haha=true"
+        would actually produce this options object: {"arguments": "-n 100 1.1.1.1", "haha": "true"}
+        because of the way cuckoo parses it
+        :return: String, base64 decoded commandline
+        """
+        arguments = self.options.get("arguments")
+        return base64.b64decode(arguments) if arguments else ""
+
+    @staticmethod
+    def _allow_embedded_flash():
+        """
+        Allows embedded flash objects in OLE docs
+        to be executed automatically by disabling the adobe check dialog.
+        seen in CVE-2018-15982 PoC
+        "this document contains embedded content"
+        :return: None
+        """
+        conf_flag = "MSOfficeEmbedCheckDisable = 1"
+        adobe_config_path = os.path.join("/Windows/System32/Macromed/Flash", "mms.cfg")
+        with open(adobe_config_path, "a") as file_to_append:
+            file_to_append.write(conf_flag)
+
+    def _check_preloaded_apps(self):
+        """Check if preloaded apps should be killed,
+        depends on package type.
+        """
+        package = type(self).__name__
+        if package not in PACKAGE_TO_PRELOADED_APPS.keys():
+            log.warning("package %s is not preloaded, kill preloaded", package)
+            for preloaded_app in PACKAGE_TO_PRELOADED_APPS.values():
+                os.system("taskkill /im {}".format(preloaded_app))
+
     def execute(self, path, args, mode=None, maximize=False, env=None,
                 source=None, trigger=None):
         """Start an executable for analysis.
@@ -143,6 +188,12 @@ class Package(object):
         dll = self.options.get("dll")
         free = self.options.get("free")
         analysis = self.options.get("analysis")
+        kernel_mode = self.options.get("kernelmode")
+        kernel_pipe = self.options.get("kernel_logpipe", "\\\\.\\ThunderDefPipe")
+        log_pipe = self.options.get("forwarderpipe")
+        dispatcher_pipe = self.options.get("dispatcherpipe")
+        driver_options = self.options.get("driver_options")
+        package = type(self).__name__
 
         # Kernel analysis overrides the free argument.
         if analysis == "kernel":
@@ -158,10 +209,16 @@ class Package(object):
         # Setup pre-defined registry keys.
         self.init_regkeys(self.REGKEYS)
 
+        # check preloaded apps
+        self._check_preloaded_apps()
+
         p = Process()
         if not p.execute(path=path, args=args, dll=dll, free=free,
+                         kernel_mode=kernel_mode, kernel_pipe=kernel_pipe,
+                         forwarder_pipe=log_pipe, dispatcher_pipe=dispatcher_pipe,
+                         destination=self.options.get("destination", ("localhost", 1)),
                          curdir=self.curdir, source=source, mode=mode,
-                         maximize=maximize, env=env, trigger=trigger):
+                         maximize=maximize, env=env, trigger=trigger, driver_options=driver_options, package=package):
             raise CuckooPackageError(
                 "Unable to execute the initial process, analysis aborted."
             )
@@ -185,6 +242,7 @@ class Package(object):
                 dump_memory(pid)
 
         return True
+
 
 class Auxiliary(object):
     def __init__(self, options={}, analyzer=None):

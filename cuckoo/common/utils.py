@@ -366,3 +366,29 @@ def cmp_version(first, second, op):
     op = op_lookup.get(op)
 
     return op(LooseVersion(first), LooseVersion(second))
+
+def extract_stream(data):
+    """
+    Extract stream, (what comes after 'HexStream = ') if present, from a given data.
+    We strip down \x00 from wide chars.
+    :param data: data that might contain an hex stream, for example ZwQueryValueKey.arguments.Data. Looks like this:
+        HexStream = 5C00520065006700690073007400720079005C0055007300
+    :return: stripped stream, or false if no hex stream was found
+    """
+    regex = re.match('^HexStream = (.*)', data)
+    return regex.group(1).decode('hex').replace('\x00', '') if regex else False
+
+
+def handle_hex_stream(data):
+    """
+    Takes a possibly hex stream, and decodes it, if the decoded result is printable, return it,
+    Otherwise, it is likely to be a binary - therefore we base64 encode it
+    :param data: data that might contain an hex stream, for example ZwQueryValueKey.arguments.Data. Looks like this:
+        HexStream = 5C00520065006700690073007400720079005C0055007300
+    :return: decoded hex stream, could be base64 encoded if binary
+    """
+    stream = extract_stream(data)
+    if stream is not False:  # stream can actually be null (HexStream = \\x00\\x00). so we explicitly check for False
+        is_binary = not all(c in string.printable for c in stream)
+        return stream.encode("base64") if is_binary else stream
+    return data

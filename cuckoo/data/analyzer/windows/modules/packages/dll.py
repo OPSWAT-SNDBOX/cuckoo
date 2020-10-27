@@ -4,22 +4,16 @@
 # See the file 'docs/LICENSE' for copying permission.
 
 import os
-import shlex
-import shutil
+import base64
 
 from lib.common.abstracts import Package
 
+
 class Dll(Package):
     """DLL analysis package."""
-    PATHS = [
-        ("System32", "rundll32.exe"),
-    ]
 
-    def start(self, path):
-        rundll32 = self.get_path("rundll32.exe")
-        function = self.options.get("function", "DllMain")
-        arguments = self.options.get("arguments", "")
-        loader_name = self.options.get("loader")
+    def _execute_exports(self, path, architecture):
+        sndll = os.path.join("bin", "sndll32.exe" if architecture == '32' else "sndll64.exe")
 
         # Check file extension.
         ext = os.path.splitext(path)[-1].lower()
@@ -32,13 +26,15 @@ class Dll(Package):
             os.rename(path, new_path)
             path = new_path
 
-        args = ["%s,%s" % (path, function)]
-        if arguments:
-            args += shlex.split(arguments)
+        args = ["%s" % path]
 
-        if loader_name:
-            loader = os.path.join(os.path.dirname(rundll32), loader_name)
-            shutil.copy(rundll32, loader)
-            rundll32 = loader
+        export_settings = self.options.get("dll_export")
+        if export_settings:
+            # handle execution of a specific export
+            decode_settings = base64.b64decode(export_settings)
+            args.extend(decode_settings.split())
 
-        return self.execute(rundll32, args=args)
+        return self.execute(sndll, args=args)
+
+    def start(self, path):
+        return self._execute_exports(path, '32')
