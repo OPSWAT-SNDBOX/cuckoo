@@ -566,6 +566,8 @@ class Analyzer(object):
         """Run analysis.
         @return: operation status.
         """
+        start = KERNEL32.GetTickCount()
+
         self.prepare()
         self.path = os.getcwd()
 
@@ -638,6 +640,8 @@ class Analyzer(object):
             self.target = self.package.move_curdir(self.target)
 
         # Initialize Auxiliary modules
+        aux_start = KERNEL32.GetTickCount()
+
         Auxiliary()
         prefix = auxiliary.__name__ + "."
         for loader, name, ispkg in pkgutil.iter_modules(auxiliary.__path__, prefix):
@@ -677,6 +681,9 @@ class Analyzer(object):
                           module.__name__)
                 aux_enabled.append(aux)
 
+        aux_end = KERNEL32.GetTickCount()
+        log.debug("Loaded auxiliary modules in {}s".format(str((aux_end - aux_start) / 1000)))
+
         # Inform zer0m0n of the ResultServer address.
         zer0m0n.resultserver(self.config.ip, self.config.port)
 
@@ -696,9 +703,14 @@ class Analyzer(object):
 
         # Start analysis package. If for any reason, the execution of the
         # analysis package fails, we have to abort the analysis.
+        process_monitoring_start = KERNEL32.GetTickCount()
+
         pids = self.package.start(self.target)
 
-        # If the analysis package returned a list of process identifiers, we
+        process_monitoring_end = KERNEL32.GetTickCount()
+        log.debug("Monitored first process in {}s".format(str((process_monitoring_end - process_monitoring_start) / 1000)))
+
+    # If the analysis package returned a list of process identifiers, we
         # add them to the list of monitored processes and enable the process monitor.
         if pids:
             self.process_list.add_pids(pids)
@@ -717,6 +729,9 @@ class Analyzer(object):
         if self.config.enforce_timeout:
             log.info("Enabled timeout enforce, running for the full timeout.")
             pid_check = False
+
+        end = KERNEL32.GetTickCount()
+        log.info("Initialized VM in {}s".format(str((end - start) / 1000)))
 
         end = KERNEL32.GetTickCount() + int(self.config.timeout) * 1000
 
