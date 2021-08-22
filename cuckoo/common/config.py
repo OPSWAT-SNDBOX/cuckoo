@@ -658,6 +658,9 @@ class Config(object):
                 "url": String(),
                 "probes": String(required=False),
             },
+            "pcap_filter": {
+                "enabled": Boolean(False),
+            },
         },
         "qemu": {
             "qemu": {
@@ -876,6 +879,7 @@ class Config(object):
                 "interface": String("eth0"),
                 "machines": List(String, "analysis1"),
                 "unverified_ssl": Boolean(False),
+                "vm_folder": String(),
             },
             "*": {
                 "__section__": "analysis1",

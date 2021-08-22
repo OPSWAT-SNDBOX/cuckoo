@@ -2,9 +2,14 @@
 # This file is part of Cuckoo Sandbox - http://www.cuckoosandbox.org
 # See the file 'docs/LICENSE' for copying permission.
 
-from _winreg import HKEY_CURRENT_USER
+import os
+import logging
+
 
 from lib.common.abstracts import Package
+
+log = logging.getLogger(__name__)
+
 
 class PPT(Package):
     """PowerPoint analysis package."""
@@ -20,42 +25,18 @@ class PPT(Package):
         ("ProgramFiles", "Microsoft Office", "root", "Office16", "POWERPNT.EXE"),
     ]
 
-    REGKEYS = [
-        [
-            HKEY_CURRENT_USER,
-            "Software\\Microsoft\\Office\\12.0\\Common\\General",
-            {
-                # "Welcome to the 2007 Microsoft Office system"
-                "ShownOptIn": 1,
-            },
-        ],
-        [
-            HKEY_CURRENT_USER,
-            "Software\\Microsoft\\Office\\12.0\\Powerpoint\\Security",
-            {
-                # Enable VBA macros in Office 2007.
-                "VBAWarnings": 1,
-                "AccessVBOM": 1,
-
-                # "The file you are trying to open .xyz is in a different
-                # format than specified by the file extension. Verify the file
-                # is not corrupted and is from trusted source before opening
-                # the file. Do you want to open the file now?"
-                "ExtensionHardening": 0,
-            },
-        ],
-        [
-            HKEY_CURRENT_USER,
-            "Software\\Microsoft\\Office\\Common\\Security",
-            {
-                # Enable all ActiveX controls without restrictions & prompting.
-                "DisableAllActiveX": 0,
-                "UFIControls": 1,
-            },
-        ],
-    ]
-
     def start(self, path):
+        # We observed multiple files that Powerpoint failed to open
+        # directly into slideshow mode (where the exploit occur).
+        # Renaming to .pps extention force this situation
+        # regarding of prior extention
+        if path.endswith(".ppt") or path.endswith(".pptx"):
+            os.rename(path, path + ".pps")
+            path += ".pps"
+            log.info("Submitted file is using ppt/x extension, added .pps")
+
+        self._allow_embedded_flash()
+
         powerpoint = self.get_path("Microsoft Office PowerPoint")
         return self.execute(
             powerpoint, args=["/S", path], mode="office",

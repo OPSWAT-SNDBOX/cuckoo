@@ -14,6 +14,8 @@ from cuckoo.common.utils import guid_name, htmlprettify
 
 log = logging.getLogger(__name__)
 
+DRIVER_NULL = "(null)"
+
 class MonitorProcessLog(list):
     """Yields each API call event to the parent handler. Optionally it may
     beautify certain API calls."""
@@ -208,6 +210,7 @@ class MonitorProcessLog(list):
         """
         return self.has_apicalls
 
+
 class WindowsMonitor(BehaviorHandler):
     """Parses monitor generated logs."""
     key = "processes"
@@ -260,7 +263,7 @@ class WindowsMonitor(BehaviorHandler):
                     # "real" time again even though we already do this in
                     # MonitorProcessLog.
                     ts = process["first_seen"] + \
-                        datetime.timedelta(0, 0, event["time"] * 1000)
+                         datetime.timedelta(0, 0, event["time"] * 1000)
 
                     yield {
                         "type": "reboot",
@@ -279,242 +282,269 @@ class WindowsMonitor(BehaviorHandler):
     def run(self):
         if not self.matched:
             return
-
+        for process in self.processes:
+            process['calls_by_handle'] = get_handles_in_process(process)
         self.processes.sort(key=lambda process: process["first_seen"])
         return self.processes
 
+
 def NT_SUCCESS(value):
-    return value % 2**32 < 0x80000000
+    return value % 2 ** 32 < 0x80000000
+
 
 def single(key, value):
-    return [(key, value)]
+    if not is_driver_null(value): # no point in appending if value is null
+        return [(key, find_and_normalize(value))]
+
+
+def find_and_normalize(value):
+    """
+    Normalizes both strings and dicts that contain strings
+    :param value: value that might contain path that needs normalizing, for example:
+        ??C:\\Users\Petra\data??.txt
+    :return: normalized string or tuple
+    """
+    if isinstance(value, dict):
+        # if value is a dictionary, try to normalize the values
+        return {k: normalize_dict_value(v) for k, v in value.items()}
+    return normalize_path(value)
+
+
+def normalize_dict_value(data):
+    """
+    Normalizes dict values, which mostly represent registry information as it cannot
+    fit in a string.
+    Replaces driver nulls with actual nulls and normalizes paths
+    :param data: dict value, could be a registry key for instance
+    :return: normalized value
+    """
+    if is_driver_null(data):
+        return None
+    return normalize_path(data)
+
+
+def normalize_path(path):
+    normal_path = path.replace("\\??\\", "")
+    return re.sub(r':\\Users\\+(Petra)', ':\Users\<USER>', normal_path)
+
+
+def is_driver_null(data):
+    """
+    Checks if provided data means null
+    :param data: output string from driver
+    :return: boolean
+    """
+    return data == DRIVER_NULL
+
 
 def multiple(*l):
     return l
 
+
+def is_handle_valid(handle):
+    """
+    Filter out unimportant handles
+    :param handle: the handle
+    :return: boolean
+    """
+    invalid_handles = ["0x00000000",
+                       "0xFFFFFFFF",
+                       "0xFFFFFFFE"]
+    return str(handle) not in invalid_handles
+
+
+def get_handle_in_call(call):
+    """Extract handles from a given API call
+
+    @param call: call to search in
+    @return: handles
+    """
+    handles = []
+    for argument in call["arguments"]:
+        if "Handle" in argument:
+            handles.append(call["arguments"][argument])
+    return filter(is_handle_valid, handles)
+
+
+def get_handles_in_process(process):
+    """Get calls grouped by handle of a process
+
+    @param process: the process to get the handles of
+    @return: handles
+    """
+    handles_in_use = {}
+    list_of_handle_uses = []
+
+    calls = list(process.get("calls", []))
+
+    for call in calls:
+        handles = get_handle_in_call(call)
+        for handle in handles:
+            handles_in_use.setdefault(handle, []).append(call)
+            if call["api"] == "ZwClose":
+                list_of_handle_uses.append(handles_in_use.pop(handle))
+
+    for handle, remaining_calls in handles_in_use.iteritems():
+        list_of_handle_uses.append(remaining_calls)
+    return list_of_handle_uses
+
+
 class BehaviorReconstructor(object):
     """Reconstructs the behavior of behavioral API logs."""
+
     def __init__(self):
         self.files = {}
+        self.registry = {}
 
     def process_apicall(self, event):
         fn = getattr(self, "_api_%s" % event["api"], None)
         if fn is not None:
-            ret = fn(
-                event["return_value"], event["arguments"], event.get("flags")
-            )
-            return ret or []
+            try:
+                ret = fn(event["status"], event["arguments"], event.get("flags"))
+                return ret or []
+            except KeyError as e:
+                log.warning("Missing argument %s on %s" % (str(e), event["api"]))
         return []
 
     # Generic file & directory stuff.
+    # TODO: Implement this using ZwCreateFile
+    # def _api_CreateDirectoryW(self, return_value, arguments, flags):
+    #     return single("directory_created", arguments["dirpath"])
+    #
+    # _api_CreateDirectoryExW = _api_CreateDirectoryW
+    #
+    # def _api_RemoveDirectoryA(self, return_value, arguments, flags):
+    #     return single("directory_removed", arguments["dirpath"])
+    #
+    # _api_RemoveDirectoryW = _api_RemoveDirectoryA
+    #
+    # def _api_MoveFileWithProgressW(self, return_value, arguments, flags):
+    #     return single("file_moved", (
+    #         arguments["oldfilepath"], arguments["newfilepath"]
+    #     ))
+    #
+    # def _api_CopyFileA(self, return_value, arguments, flags):
+    #     return single("file_copied", (
+    #         arguments["oldfilepath"], arguments["newfilepath"]
+    #     ))
+    #
+    # _api_CopyFileW = _api_CopyFileA
+    # _api_CopyFileExW = _api_CopyFileA
 
-    def _api_CreateDirectoryW(self, return_value, arguments, flags):
-        return single("directory_created", arguments["dirpath"])
+    def _api_ZwSetInformationFile(self, return_value, arguments, flags):
+        if arguments["FileInformationClass"] == "0x0000000A":
+            return single("file_renamed", arguments["FilePath"])
 
-    _api_CreateDirectoryExW = _api_CreateDirectoryW
+    def _api_ZwDeleteFile(self, return_value, arguments, flags):
+        return single("file_deleted", arguments["FilePath"])
 
-    def _api_RemoveDirectoryA(self, return_value, arguments, flags):
-        return single("directory_removed", arguments["dirpath"])
+    def _api_ZwCreateFile(self, status, arguments, flags):
+        self.files[arguments["Handle"]] = arguments["FilePath"]
 
-    _api_RemoveDirectoryW = _api_RemoveDirectoryA
+        options = {
+            'file_superseded': 0,
+            'file_opened': 1,
+            'file_created': 2,
+            'file_overwritten': 3,
+            'file_exists': 4,
+            'file_does_not_exist': 5
+        }
 
-    def _api_MoveFileWithProgressW(self, return_value, arguments, flags):
-        return single("file_moved", (
-            arguments["oldfilepath"], arguments["newfilepath"]
-        ))
+        if status:
+            status_info = int(arguments.get("Information", ""), 0)
 
-    def _api_CopyFileA(self, return_value, arguments, flags):
-        return single("file_copied", (
-            arguments["oldfilepath"], arguments["newfilepath"]
-        ))
+            if status_info == options["file_overwritten"] or status_info == options["file_superseded"]:
+                return single("file_recreated", arguments["FilePath"])
 
-    _api_CopyFileW = _api_CopyFileA
-    _api_CopyFileExW = _api_CopyFileA
+            elif status_info == options["file_exists"]:
+                return single("file_opened", arguments["FilePath"])
 
-    def _api_DeleteFileA(self, return_value, arguments, flags):
-        return single("file_deleted", arguments["filepath"])
+            elif status_info == options["file_does_not_exist"]:
+                return single("file_failed", arguments["FilePath"])
 
-    _api_DeleteFileW = _api_DeleteFileA
-    _api_NtDeleteFile = _api_DeleteFileA
-
-    def _api_FindFirstFileExA(self, return_value, arguments, flags):
-        return single("directory_enumerated", arguments["filepath"])
-
-    _api_FindFirstFileExW = _api_FindFirstFileExA
-
-    def _api_LdrLoadDll(self, return_value, arguments, flags):
-        return single("dll_loaded", arguments["module_name"])
-
-    def _api_NtCreateFile(self, return_value, arguments, flags):
-        self.files[arguments["file_handle"]] = arguments["filepath"]
-        if NT_SUCCESS(return_value):
-            status_info = flags.get("status_info", "").lower()
-            if status_info in ("file_overwritten", "file_superseded"):
-                return single("file_recreated", arguments["filepath"])
-            elif status_info == "file_exists":
-                return single("file_opened", arguments["filepath"])
-            elif status_info == "file_does_not_exist":
-                return single("file_failed", arguments["filepath"])
-            elif status_info == "file_created":
-                return single("file_created", arguments["filepath"])
+            elif status_info == options["file_created"]:
+                return single("file_created", arguments["FilePath"])
             else:
-                return single("file_opened", arguments["filepath"])
+                return single("file_opened", arguments["FilePath"])
         else:
-            return single("file_failed", arguments["filepath"])
+            return single("file_failed", arguments["FilePath"])
 
-    _api_NtOpenFile = _api_NtCreateFile
+    _api_ZwOpenFile = _api_ZwCreateFile
 
-    def _api_NtReadFile(self, return_value, arguments, flags):
-        h = arguments["file_handle"]
-        if NT_SUCCESS(return_value) and h in self.files:
+    def _api_ZwReadFile(self, status, arguments, flags):
+        h = arguments["FileHandle"]
+        if status and h in self.files:  # look for that specific handle in the recorded handle list
             return single("file_read", self.files[h])
 
-    def _api_NtWriteFile(self, return_value, arguments, flags):
-        h = arguments["file_handle"]
-        if NT_SUCCESS(return_value) and h in self.files:
+    def _api_ZwWriteFile(self, status, arguments, flags):
+        h = arguments["FileHandle"]
+        if status and h in self.files:
             return single("file_written", self.files[h])
 
-    def _api_GetFileAttributesW(self, return_value, arguments, flags):
-        return single("file_exists", arguments["filepath"])
-
-    _api_GetFileAttributesExW = _api_GetFileAttributesW
+    def _api_ZwQueryAttributesFile(self, return_value, arguments, flags):
+        return single("file_exists", arguments["FileName"])
 
     # Registry stuff.
 
-    def _api_RegOpenKeyExA(self, return_value, arguments, flags):
-        return single("regkey_opened", arguments["regkey"])
+    def _api_ZwOpenKey(self, status, arguments, flags):
+        # append the RootDirectory if it is not "null", can be null in some cases.
+        root_directory = arguments["RootDirectory"] + "\\" if arguments["RootDirectory"] != DRIVER_NULL else ""
+        key = "{}{}".format(root_directory, arguments["ObjectName"])
 
-    _api_RegOpenKeyExW = _api_RegOpenKeyExA
-    _api_RegCreateKeyExA = _api_RegOpenKeyExA
-    _api_RegCreateKeyExW = _api_RegOpenKeyExA
+        self.registry[arguments["KeyHandle"]] = key
 
-    def _api_RegDeleteKeyA(self, return_value, arguments, flags):
-        return single("regkey_deleted", arguments["regkey"])
+        return single("registry_opened", key)
 
-    _api_RegDeleteKeyW = _api_RegDeleteKeyA
-    _api_RegDeleteValueA = _api_RegDeleteKeyA
-    _api_RegDeleteValueW = _api_RegDeleteKeyA
-    _api_NtDeleteValueKey = _api_RegDeleteKeyA
+    _api_ZwOpenKeyEx = _api_ZwOpenKey
 
-    def _api_RegQueryValueExA(self, return_value, arguments, flags):
-        return single("regkey_read", arguments["regkey"])
+    _api_ZwCreateKey = _api_ZwOpenKey
 
-    _api_RegQueryValueExW = _api_RegQueryValueExA
-    _api_NtQueryValueKey = _api_RegQueryValueExA
+    def _api_ZwDeleteKey(self, status, arguments, flags):
+        handle = arguments["KeyHandle"]
+        if handle in self.registry:
+            return single("registry_deleted", {
+                "key": self.registry[handle],
+                "value": arguments['ValueName']
+            })
 
-    def _api_RegSetValueExA(self, return_value, arguments, flags):
-        return single("regkey_written", arguments["regkey"])
+    _api_ZwDeleteValueKey = _api_ZwDeleteKey
 
-    _api_RegSetValueExW = _api_RegSetValueExA
-    _api_NtSetValueKey = _api_RegSetValueExA
+    def _api_ZwQueryValueKey(self, status, arguments, flags):
+        handle = arguments["KeyHandle"]
+        if handle in self.registry:
+            return single("registry_read", {
+                "key":  self.registry[handle],
+                "value": arguments['ValueName'],
+                "data": arguments["Data"]
+            })
 
-    def _api_NtClose(self, return_value, arguments, flags):
-        self.files.pop(arguments["handle"], None)
+    def _api_ZwSetValueKey(self, status, arguments, flags):
+        handle = arguments["KeyHandle"]
+        if handle in self.registry:
+            return single("registry_written", {
+                "key":  self.registry[handle],
+                "value": arguments['ValueName'],
+                "data": arguments["Data"]
+            })
 
-    # Network stuff.
-
-    def _api_URLDownloadToFileW(self, return_value, arguments, flags):
-        return multiple(
-            ("downloads_file", arguments["url"]),
-            ("file_opened", arguments["filepath"]),
-            ("file_written", arguments["filepath"]),
-        )
-
-    def _api_InternetConnectA(self, return_value, arguments, flags):
-        return single("connects_host", arguments["hostname"])
-
-    _api_InternetConnectW = _api_InternetConnectA
-
-    def _api_InternetOpenUrlA(self, return_value, arguments, flags):
-        return single("fetches_url", arguments["url"])
-
-    _api_InternetOpenUrlW = _api_InternetOpenUrlA
-
-    def _api_DnsQuery_A(self, return_value, arguments, flags):
-        if arguments["hostname"]:
-            return single("resolves_host", arguments["hostname"])
-
-    _api_DnsQuery_W = _api_DnsQuery_A
-    _api_DnsQuery_UTF8 = _api_DnsQuery_A
-    _api_getaddrinfo = _api_DnsQuery_A
-    _api_GetAddrInfoW = _api_DnsQuery_A
-    _api_gethostbyname = _api_DnsQuery_A
-
-    def _api_connect(self, return_value, arguments, flags):
-        return single("connects_ip", arguments["ip_address"])
+    def _api_ZwClose(self, status, arguments, flags):
+        self.files.pop(arguments["Handle"], None)
+        self.registry.pop(arguments["Handle"], None)
 
     # Mutex stuff
 
-    def _api_NtCreateMutant(self, return_value, arguments, flags):
-        if arguments["mutant_name"]:
-            return single("mutex", arguments["mutant_name"])
-
-    _api_ConnectEx = _api_connect
+    def _api_ZwCreateMutant(self, return_value, arguments, flags):
+        if arguments["MutexName"]:
+            mutex = arguments["MutexName"].replace("!petra", "!<USER>")
+            return single("mutex", mutex)
 
     # Process stuff.
 
-    def _api_CreateProcessInternalW(self, return_value, arguments, flags):
+    def _api_CreateUserProcess(self, return_value, arguments, flags):
         if arguments.get("track", True):
-            cmdline = arguments["command_line"] or arguments["filepath"]
+            cmdline = "%s %s" % (arguments["ImagePathName"], arguments["CommandLine"])
             return single("command_line", cmdline)
 
-    def _api_ShellExecuteExW(self, return_value, arguments, flags):
-        if arguments["parameters"]:
-            cmdline = "%s %s" % (arguments["filepath"], arguments["parameters"])
-        else:
-            cmdline = arguments["filepath"]
-        return single("command_line", cmdline)
-
-    def _api_system(self, return_value, arguments, flags):
-        return single("command_line", arguments["command"])
-
-    # WMI stuff.
-
-    def _api_IWbemServices_ExecQuery(self, return_value, arguments, flags):
-        return single("wmi_query", arguments["query"])
-
-    def _api_IWbemServices_ExecQueryAsync(self, return_value, arguments, flags):
-        return single("wmi_query", arguments["query"])
-
-    # GUIDs.
-
-    def _api_CoCreateInstance(self, return_value, arguments, flags):
-        return multiple(
-            ("guid", arguments["clsid"]),
-            ("guid", arguments["iid"]),
-        )
-
-    def _api_CoCreateInstanceEx(self, return_value, arguments, flags):
-        ret = [
-            ("guid", arguments["clsid"]),
-        ]
-        for iid in arguments["iid"]:
-            ret.append(("guid", iid))
-        return multiple(*ret)
-
-    def _api_CoGetClassObject(self, return_value, arguments, flags):
-        return multiple(
-            ("guid", arguments["clsid"]),
-            ("guid", arguments["iid"]),
-        )
-
-    # SSLv3 & TLS Master Secrets.
-
-    def _api_Ssl3GenerateKeyMaterial(self, return_value, arguments, flags):
-        if arguments["client_random"] and arguments["server_random"]:
-            return single("tls_master", (
-                arguments["client_random"],
-                arguments["server_random"],
-                arguments["master_secret"],
-            ))
-
-    def _api_PRF(self, return_value, arguments, flags):
-        if arguments["type"] == "key expansion":
-            return single("tls_master", (
-                arguments["client_random"],
-                arguments["server_random"],
-                arguments["master_secret"],
-            ))
 
 class RebootReconstructor(object):
     """Reconstructs the behavior as would be seen after a reboot."""
